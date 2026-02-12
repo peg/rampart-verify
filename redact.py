@@ -59,7 +59,10 @@ def redact_secrets(text: str) -> str:
     if not text:
         return text
 
-    result = text
+    # Collapse line continuations before matching (shell `\` at EOL).
+    collapsed = re.sub(r'\\\n\s*', '', text)
+
+    result = collapsed
     for pattern, replacement in _COMPILED:
         result = pattern.sub(replacement, result)
 
