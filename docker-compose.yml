@@ -1,0 +1,40 @@
+# Rampart Verify — semantic verification sidecar
+# Usage: docker compose up
+#
+# Default: uses Ollama locally (free, no API key needed)
+# For OpenAI: set OPENAI_API_KEY in .env file and VERIFY_MODEL=gpt-4o-mini
+
+services:
+  verify:
+    build: .
+    ports:
+      - "8090:8090"
+    environment:
+      - VERIFY_MODEL=${VERIFY_MODEL:-qwen2.5-coder:1.5b}
+      - VERIFY_PORT=8090
+      - VERIFY_HOST=0.0.0.0
+      - OLLAMA_URL=http://ollama:11434
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - verify-logs:/root/.rampart/verify
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # Pull the default model on first start
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull qwen2.5-coder:1.5b &&
+             wait"
+
+volumes:
+  ollama-data:
+  verify-logs:
