@@ -14,10 +14,13 @@ SECRET_PATTERNS = [
     (r'AKIA[0-9A-Z]{16}', '[REDACTED_AWS_KEY]'),
     (r'(?i)(aws_secret_access_key|aws_session_token)[=:]\s*\S+', r'\1=[REDACTED]'),
 
+    # Stripe keys (before generic sk- pattern)
+    (r'(?:sk|pk|rk)_(?:live|test)_[a-zA-Z0-9]{10,}', '[REDACTED_STRIPE_KEY]'),
+
     # OpenAI / Anthropic / common API keys
-    (r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]'),
     (r'sk-ant-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]'),
     (r'sk-proj-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]'),
+    (r'sk-[a-zA-Z0-9_-]{20,}', '[REDACTED_API_KEY]'),
 
     # GitHub tokens
     (r'ghp_[a-zA-Z0-9]{36}', '[REDACTED_GH_TOKEN]'),
