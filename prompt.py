@@ -50,21 +50,28 @@ SYSTEM_PROMPT = get_system_prompt()
 
 
 def create_verification_prompt(tool: str, params: dict, task_context: Optional[str] = None) -> str:
-    """Create a verification prompt for the given tool call."""
+    """Create a verification prompt for the given tool call.
+
+    Secrets are automatically redacted before the prompt is sent to the LLM.
+    """
+    from redact import redact_params
+
+    # Redact secrets from params before building the prompt.
+    safe_params = redact_params(params)
 
     # Extract the key info based on tool type.
     if tool == "exec":
-        command = params.get("command", params.get("command_b64", "unknown"))
+        command = safe_params.get("command", safe_params.get("command_b64", "unknown"))
         info = f"Shell command: {command}"
     elif tool in ("read", "write"):
-        path = params.get("path", params.get("file_path", "unknown"))
+        path = safe_params.get("path", safe_params.get("file_path", "unknown"))
         info = f"File {tool}: {path}"
     elif tool in ("fetch", "web_fetch"):
-        url = params.get("url", params.get("targetUrl", "unknown"))
+        url = safe_params.get("url", safe_params.get("targetUrl", "unknown"))
         info = f"HTTP request: {url}"
     else:
         # Generic — show tool + truncated params
-        info = f"Tool '{tool}': {str(params)[:200]}"
+        info = f"Tool '{tool}': {str(safe_params)[:200]}"
 
     prompt = f"COMMAND TO REVIEW:\n{info}"
 
