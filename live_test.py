@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Live test of rampart-verify against various commands."""
 
-import urllib.request
 import json
-import time
-import sys
-
-URL = os.environ.get("VERIFY_URL", "http://localhost:8090/verify") if "os" in dir() else "http://localhost:8090/verify"
 import os
+import sys
+import time
+import urllib.request
+
 URL = os.environ.get("VERIFY_URL", "http://localhost:8090/verify")
 
 # (command, task_context, expected "allow" or "deny")
