@@ -2,12 +2,14 @@
 
 import os
 import json
+import asyncio
+import time
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
@@ -32,6 +34,77 @@ logger = logging.getLogger(__name__)
 DECISION_LOG = LOG_DIR / "decisions.jsonl"
 
 app = FastAPI(title="Rampart Verify", description="Semantic verification sidecar for Rampart")
+
+
+def _parse_rate_limit() -> int:
+    """Parse requests/minute limit from env with safe fallback."""
+    raw = os.getenv("VERIFY_RATE_LIMIT", "60")
+    try:
+        value = int(raw)
+        return value if value > 0 else 60
+    except ValueError:
+        logger.warning(f"Invalid VERIFY_RATE_LIMIT={raw!r}, using default 60")
+        return 60
+
+
+class TokenBucketRateLimiter:
+    """Simple in-memory token bucket rate limiter."""
+
+    def __init__(self, capacity: int, refill_per_second: float):
+        self.capacity = float(capacity)
+        self.refill_per_second = refill_per_second
+        self.tokens = float(capacity)
+        self.last_refill = time.monotonic()
+        self.lock = asyncio.Lock()
+
+    async def allow(self) -> bool:
+        async with self.lock:
+            now = time.monotonic()
+            elapsed = now - self.last_refill
+            self.last_refill = now
+
+            self.tokens = min(self.capacity, self.tokens + (elapsed * self.refill_per_second))
+            if self.tokens < 1.0:
+                return False
+
+            self.tokens -= 1.0
+            return True
+
+
+RATE_LIMIT_PER_MINUTE = _parse_rate_limit()
+rate_limiter = TokenBucketRateLimiter(
+    capacity=RATE_LIMIT_PER_MINUTE,
+    refill_per_second=RATE_LIMIT_PER_MINUTE / 60.0,
+)
+
+service_start = time.monotonic()
+metrics_lock = asyncio.Lock()
+total_requests = 0
+total_allows = 0
+total_denies = 0
+total_errors = 0
+total_latency_ms = 0.0
+total_latency_samples = 0
+
+
+async def _record_request_metrics(
+    *,
+    latency_ms: float,
+    decision: Optional[str] = None,
+    error: bool = False,
+) -> None:
+    """Update in-memory metrics counters."""
+    global total_allows, total_denies, total_errors, total_latency_ms, total_latency_samples
+
+    async with metrics_lock:
+        if decision == "allow":
+            total_allows += 1
+        elif decision == "deny":
+            total_denies += 1
+        if error:
+            total_errors += 1
+        total_latency_ms += latency_ms
+        total_latency_samples += 1
 
 
 class WebhookRequest(BaseModel):
@@ -74,23 +147,50 @@ def log_decision(request: WebhookRequest, response: VerificationResponse, latenc
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with provider ping."""
     model = os.getenv("VERIFY_MODEL", "gpt-4o-mini")
+    start = time.monotonic()
+
+    try:
+        provider = get_provider(model)
+        await provider.generate("say ok", max_tokens=5)
+        latency_ms = (time.monotonic() - start) * 1000
+        status = "healthy"
+        error: Optional[str] = None
+    except Exception as exc:
+        latency_ms = (time.monotonic() - start) * 1000
+        status = "degraded"
+        error = str(exc)
+
     return {
-        "status": "healthy",
+        "status": status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": model,
+        "latency_ms": round(latency_ms, 1),
         "log_dir": str(LOG_DIR),
+        **({"error": error} if error else {}),
     }
 
 
 @app.post("/verify", response_model=VerificationResponse)
 async def verify_action(request: WebhookRequest):
     """Main verification endpoint — called by Rampart's action:webhook."""
-    import time
+    global total_requests
 
     start = time.monotonic()
     model = os.getenv("VERIFY_MODEL", "gpt-4o-mini")
+
+    async with metrics_lock:
+        total_requests += 1
+
+    allowed = await rate_limiter.allow()
+    if not allowed:
+        elapsed = (time.monotonic() - start) * 1000
+        await _record_request_metrics(latency_ms=elapsed)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {RATE_LIMIT_PER_MINUTE} requests per minute",
+        )
 
     logger.info(f"Verifying {request.tool}: {_summarize_params(request.params)}")
 
@@ -114,6 +214,7 @@ async def verify_action(request: WebhookRequest):
 
         elapsed = (time.monotonic() - start) * 1000
         log_decision(request, result, elapsed)
+        await _record_request_metrics(latency_ms=elapsed, decision=decision)
         logger.info(f"Decision: {decision} ({elapsed:.0f}ms)" + (f" — {reason}" if reason else ""))
         return result
 
@@ -129,6 +230,7 @@ async def verify_action(request: WebhookRequest):
             model=model,
         )
         log_decision(request, result, elapsed)
+        await _record_request_metrics(latency_ms=elapsed, decision="allow", error=True)
         return result
 
 
@@ -182,6 +284,23 @@ async def root():
         "model": model,
         "recommended_models": RECOMMENDED_MODELS,
     }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Simple in-process metrics endpoint."""
+    now = time.monotonic()
+    async with metrics_lock:
+        avg_latency_ms = (total_latency_ms / total_latency_samples) if total_latency_samples else 0.0
+        return {
+            "total_requests": total_requests,
+            "total_allows": total_allows,
+            "total_denies": total_denies,
+            "total_errors": total_errors,
+            "avg_latency_ms": round(avg_latency_ms, 1),
+            "model": os.getenv("VERIFY_MODEL", "gpt-4o-mini"),
+            "uptime_seconds": round(now - service_start, 1),
+        }
 
 
 def main():

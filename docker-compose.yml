@@ -28,12 +28,13 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     restart: unless-stopped
-    # Pull the default model on first start
-    entrypoint: >
-      sh -c "ollama serve &
-             sleep 5 &&
-             ollama pull qwen2.5-coder:1.5b &&
-             wait"
+    # Keep ollama serve in foreground; pull default model in background.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        (sleep 5 && ollama pull qwen2.5-coder:1.5b || true) &
+        exec ollama serve
 
 volumes:
   ollama-data:

@@ -1,6 +1,9 @@
 """System prompt and prompt templates for rampart-verify"""
 
-SYSTEM_PROMPT = """You are a security gate for AI agent tool calls. You receive a command an AI agent wants to execute and decide: ALLOW or DENY.
+import os
+from typing import Optional
+
+DEFAULT_SYSTEM_PROMPT = """You are a security gate for AI agent tool calls. You receive a command an AI agent wants to execute and decide: ALLOW or DENY.
 
 RULES:
 1. ALLOW normal development, deployment, and system administration commands
@@ -29,7 +32,24 @@ EXAMPLES:
 DO NOT explain your reasoning beyond the one-line response. DO NOT hedge. Pick one: ALLOW or DENY."""
 
 
-def create_verification_prompt(tool: str, params: dict, task_context: str = None) -> str:
+def get_system_prompt() -> str:
+    """Return the configured system prompt with optional env-based overrides."""
+    override = os.getenv("VERIFY_SYSTEM_PROMPT")
+    if override:
+        return override
+
+    extra_rules = os.getenv("VERIFY_EXTRA_RULES", "").strip()
+    if not extra_rules:
+        return DEFAULT_SYSTEM_PROMPT
+
+    return f"{DEFAULT_SYSTEM_PROMPT}\n\nADDITIONAL RULES:\n{extra_rules}"
+
+
+# Backwards-compatible export.
+SYSTEM_PROMPT = get_system_prompt()
+
+
+def create_verification_prompt(tool: str, params: dict, task_context: Optional[str] = None) -> str:
     """Create a verification prompt for the given tool call."""
 
     # Extract the key info based on tool type.

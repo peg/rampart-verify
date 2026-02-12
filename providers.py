@@ -5,7 +5,7 @@ import logging
 import httpx
 from abc import ABC, abstractmethod
 
-from prompt import SYSTEM_PROMPT
+from prompt import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ RETRY_DELAY = 1.0
 
 class LLMProvider(ABC):
     @abstractmethod
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str, max_tokens: int = 150) -> str:
         pass
 
     async def _retry_generate(self, fn) -> str:
@@ -52,7 +52,7 @@ class OpenAIProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str, max_tokens: int = 150) -> str:
         async def _call():
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 response = await client.post(
@@ -64,11 +64,11 @@ class OpenAIProvider(LLMProvider):
                     json={
                         "model": self.model,
                         "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "system", "content": get_system_prompt()},
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.1,
-                        "max_tokens": 150,
+                        "max_tokens": max_tokens,
                     },
                 )
                 response.raise_for_status()
@@ -84,7 +84,7 @@ class AnthropicProvider(LLMProvider):
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
 
-    async def generate(self, prompt: str) -> str:
+    async def generate(self, prompt: str, max_tokens: int = 150) -> str:
         async def _call():
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 response = await client.post(
@@ -96,8 +96,8 @@ class AnthropicProvider(LLMProvider):
                     },
                     json={
                         "model": self.model,
-                        "system": SYSTEM_PROMPT,
-                        "max_tokens": 150,
+                        "system": get_system_prompt(),
+                        "max_tokens": max_tokens,
                         "messages": [{"role": "user", "content": prompt}],
                     },
                 )
@@ -112,8 +112,8 @@ class OllamaProvider(LLMProvider):
         self.model = model
         self.url = url
 
-    async def generate(self, prompt: str) -> str:
-        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+    async def generate(self, prompt: str, max_tokens: int = 150) -> str:
+        full_prompt = f"{get_system_prompt()}\n\n{prompt}"
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             response = await client.post(
                 f"{self.url}/api/generate",
@@ -121,7 +121,7 @@ class OllamaProvider(LLMProvider):
                     "model": self.model,
                     "prompt": full_prompt,
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 150},
+                    "options": {"temperature": 0.1, "num_predict": max_tokens},
                 },
             )
             response.raise_for_status()
