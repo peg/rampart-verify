@@ -18,7 +18,7 @@ from prompt import create_verification_prompt
 
 # --- Logging setup: console + file ---
 LOG_DIR = Path(os.getenv("VERIFY_LOG_DIR", os.path.expanduser("~/.rampart/verify")))
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +33,24 @@ logger = logging.getLogger(__name__)
 # Decision log — append-only JSONL for audit.
 DECISION_LOG = LOG_DIR / "decisions.jsonl"
 
+# Max request body: 1MB — prevent memory exhaustion from oversized payloads.
+MAX_REQUEST_BODY = 1 * 1024 * 1024
+
 app = FastAPI(title="Rampart Verify", description="Semantic verification sidecar for Rampart")
+
+
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
+@app.middleware("http")
+async def limit_request_body(request: Request, call_next):
+    """Reject requests with bodies larger than MAX_REQUEST_BODY."""
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_REQUEST_BODY:
+        return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+    return await call_next(request)
 
 
 def _parse_rate_limit() -> int:
@@ -139,7 +156,8 @@ def log_decision(request: WebhookRequest, response: VerificationResponse, latenc
         "latency_ms": round(latency_ms, 1),
     }
     try:
-        with open(DECISION_LOG, "a") as f:
+        fd = os.open(str(DECISION_LOG), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception as e:
         logger.error(f"Failed to write decision log: {e}")
